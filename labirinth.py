@@ -1,13 +1,13 @@
 import collections
 import random
+import math
 
 from logger import log_event
-
 
 class Labyrinth:
     """
     Класс, управляющий игрой в лабиринте.
-    Содержит поле, игрока, врага и логику преследования.
+    Использует карты шумов для процедурной генерации.
     """
 
     def __init__(self, size=7, walls_data=None, seed=None):
@@ -33,10 +33,11 @@ class Labyrinth:
 
     def _generate_valid_maze(self, walls_data=None):
         """
-        Генерирует лабиринт.
+        Генерирует лабиринт на основе карты шумов.
         """
         grid = [[self.road for _ in range(self.size)] for _ in range(self.size)]
 
+        # Создаем границы (стены по краям)
         for i in range(self.size):
             grid[0][i] = self.wall
             grid[self.size - 1][i] = self.wall
@@ -45,56 +46,56 @@ class Labyrinth:
 
         walls_count = 0
         if walls_data:
-            walls_count = self._add_walls_from_data(grid, walls_data)
+            walls_count = self._add_walls_from_noise(grid, walls_data)
 
-            if not self._has_path(grid, self.p_pos, self.e_pos):
-                log_event("Maze", "Сгенерированный лабиринт непроходим! Создаём альтернативный...")
-                grid = self._create_safe_maze()
-                walls_count = self._count_walls(grid)
-            else:
-                log_event("Maze", f"Построено {walls_count} стен, путь существует")
-        else:
+        # Проверяем проходимость
+        if not self._has_path(grid, self.p_pos, self.e_pos):
+            log_event("Maze", "Сгенерированный лабиринт непроходим! Создаём альтернативный...")
             grid = self._create_safe_maze()
             walls_count = self._count_walls(grid)
-            log_event("Maze", f"Создан безопасный лабиринт с {walls_count} стенами")
+        else:
+            log_event("Maze", f"Построено {walls_count} стен из карты шумов, путь существует")
 
         return grid
 
-    def _add_walls_from_data(self, grid, data):
-        """Добавляет стены на основе данных массива."""
+    def _add_walls_from_noise(self, grid, noise_data):
+        """
+        Добавляет стены на основе карты шумов.
+        Темная зона (-1) = стена, светлая зона (1) = дорога.
+        Порог: если значение > 0, то дорога, иначе стена.
+        """
         walls_count = 0
+        side_size = int(math.sqrt(len(noise_data)))
+        
         for i in range(1, self.size - 1):
             for j in range(1, self.size - 1):
+                # Пропускаем позиции игрока и врага
                 if [i, j] == self.p_pos or [i, j] == self.e_pos:
                     continue
+                
+                # Вычисляем индекс в одномерном массиве шумов
                 idx = (i - 1) * (self.size - 2) + (j - 1)
-                if idx < len(data) and data[idx] > 50:
-                    grid[i][j] = self.wall
-                    walls_count += 1
+                
+                if idx < len(noise_data):
+                    noise_value = noise_data[idx]
+                    
+                    # Логика: темная зона (-1) = стена, светлая (1) = дорога
+                    # Порог 0: если значение < 0, то стена
+                    # Можно настроить порог (например, -0.2 для большего количества дорог)
+                    threshold = 0.0
+                    
+                    if noise_value < threshold:
+                        grid[i][j] = self.wall
+                        walls_count += 1
+                        log_event("Maze", f"Стена на ({i},{j}): шум={noise_value:.2f} < {threshold}")
+                    else:
+                        grid[i][j] = self.road
+        
         return walls_count
-
-    def _has_path(self, grid, start, target):
-        """Проверяет, существует ли путь от start до target."""
-        queue = collections.deque([tuple(start)])
-        seen = {tuple(start)}
-
-        while queue:
-            curr = queue.popleft()
-            if list(curr) == target:
-                return True
-
-            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                nx, ny = curr[0] + dx, curr[1] + dy
-                if (0 <= nx < self.size and 0 <= ny < self.size
-                        and grid[nx][ny] != self.wall
-                        and (nx, ny) not in seen):
-                    seen.add((nx, ny))
-                    queue.append((nx, ny))
-        return False
 
     def _create_safe_maze(self):
         """
-        Создаёт гарантированно проходимый лабиринт:
+        Создаёт гарантированно проходимый лабиринт (fallback).
         """
         grid = [[self.road for _ in range(self.size)] for _ in range(self.size)]
 
@@ -125,81 +126,86 @@ class Labyrinth:
 
         return grid
 
-    def _count_walls(self, grid):
-        """Подсчитывает количество стен в лабиринте."""
-        return sum(row.count(self.wall) for row in grid)
-
-    def _get_next_step(self, start, target):
-        """
-        Возвращает следующий шаг от start к target по кратчайшему пути.
-        Используется врагом для преследования игрока.
-        """
-        queue = collections.deque([[start]])
-        seen = {tuple(start)}
+    def _has_path(self, grid, start, end):
+        """Проверяет существование пути от start до end (BFS)."""
+        visited = set()
+        queue = collections.deque([tuple(start)])
+        visited.add(tuple(start))
 
         while queue:
-            path = queue.popleft()
-            curr = path[-1]
+            current = queue.popleft()
+            
+            if list(current) == end:
+                return True
 
-            if curr == target:
-                return path[1] if len(path) > 1 else start
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nx, ny = current[0] + dx, current[1] + dy
+                
+                if (0 <= nx < self.size and 0 <= ny < self.size and 
+                    grid[nx][ny] != self.wall and (nx, ny) not in visited):
+                    visited.add((nx, ny))
+                    queue.append((nx, ny))
 
-            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                nxt = [curr[0] + dx, curr[1] + dy]
-                if 0 <= nxt[0] < self.size and 0 <= nxt[1] < self.size \
-                        and self.grid[nxt[0]][nxt[1]] != self.wall \
-                        and tuple(nxt) not in seen:
-                    seen.add(tuple(nxt))
-                    queue.append(path + [nxt])
-        return start
+        return False
+
+    def _count_walls(self, grid):
+        """Считает количество стен."""
+        count = 0
+        for row in grid:
+            for cell in row:
+                if cell == self.wall:
+                    count += 1
+        return count
 
     def display(self):
-        """Выводит текущее состояние лабиринта в консоль."""
-        print("\n" + "-" * (self.size * 2 + 4))
-        for r in range(self.size):
-            row = []
-            for c in range(self.size):
-                if [r, c] == self.p_pos:
-                    row.append(self.player)
-                elif [r, c] == self.e_pos:
-                    row.append(self.enemy)
+        """Отображает лабиринт."""
+        for i in range(self.size):
+            row_str = ""
+            for j in range(self.size):
+                if [i, j] == self.p_pos:
+                    row_str += self.player + " "
+                elif [i, j] == self.e_pos:
+                    row_str += self.enemy + " "
                 else:
-                    row.append(self.grid[r][c])
-            print(" | " + " ".join(row) + " | ")
-        print("-" * (self.size * 2 + 4))
+                    row_str += self.grid[i][j] + " "
+            print(row_str)
+        print()
 
     def move_player(self, direction):
-        """
-        Перемещает игрока, если новая клетка не является стеной.
-        direction: 'w', 's', 'a', 'd'
-        """
-        d_map = {'w': [-1, 0], 's': [1, 0], 'a': [0, -1], 'd': [0, 1]}
-        d = d_map.get(direction, [0, 0])
-        new_p = [self.p_pos[0] + d[0], self.p_pos[1] + d[1]]
+        """Перемещает игрока."""
+        dx, dy = 0, 0
+        if direction == 'w': dx = -1
+        elif direction == 's': dx = 1
+        elif direction == 'a': dy = -1
+        elif direction == 'd': dy = 1
 
-        if 0 <= new_p[0] < self.size and 0 <= new_p[1] < self.size \
-                and self.grid[new_p[0]][new_p[1]] != self.wall:
-            old_pos = tuple(self.p_pos)
-            self.p_pos = new_p
-            log_event("Player", f"Переместился с {old_pos} на ({self.p_pos[0]}, {self.p_pos[1]})")
-            return True
-        else:
-            log_event("Player", f"Стена - движение невозможно в направлении {direction}")
-            return False
+        new_pos = [self.p_pos[0] + dx, self.p_pos[1] + dy]
+        
+        if (0 <= new_pos[0] < self.size and 0 <= new_pos[1] < self.size and 
+            self.grid[new_pos[0]][new_pos[1]] != self.wall):
+            self.p_pos = new_pos
+            log_event("Player", f"Игрок переместился на ({self.p_pos[0]}, {self.p_pos[1]})")
 
     def move_enemy(self):
-        """Движение врага"""
-        old_pos = tuple(self.e_pos)
-        self.e_pos = list(self._get_next_step(self.e_pos, self.p_pos))
-        log_event("Enemy", f"Переместился с {old_pos} на ({self.e_pos[0]}, {self.e_pos[1]})")
+        """Перемещает врага к игроку (простой AI)."""
+        dx = 0 if self.e_pos[0] == self.p_pos[0] else (1 if self.p_pos[0] > self.e_pos[0] else -1)
+        dy = 0 if self.e_pos[1] == self.p_pos[1] else (1 if self.p_pos[1] > self.e_pos[1] else -1)
+
+        # Пытаемся двигаться по X
+        new_pos = [self.e_pos[0] + dx, self.e_pos[1]]
+        if (0 <= new_pos[0] < self.size and 0 <= new_pos[1] < self.size and 
+            self.grid[new_pos[0]][new_pos[1]] != self.wall):
+            self.e_pos = new_pos
+        else:
+            # Пытаемся двигаться по Y
+            new_pos = [self.e_pos[0], self.e_pos[1] + dy]
+            if (0 <= new_pos[0] < self.size and 0 <= new_pos[1] < self.size and 
+                self.grid[new_pos[0]][new_pos[1]] != self.wall):
+                self.e_pos = new_pos
 
     def is_caught(self):
-        """Проверка, съел ли враг игрока."""
-        caught = self.p_pos == self.e_pos
-        if caught:
-            print("Тебя съели!")
-            log_event("Game", "Враг поймал игрока!")
-        return caught
+        """Проверяет, пойман ли игрок."""
+        return self.p_pos == self.e_pos
 
     def run(self):
         """Главный игровой цикл."""
@@ -209,6 +215,7 @@ class Labyrinth:
             self.display()
 
             if self.is_caught():
+                print("Вас поймали!")
                 break
 
             move = input("WASD: ").lower()
